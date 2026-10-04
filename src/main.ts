@@ -5,6 +5,8 @@ import { applySelection, brushStroke, magicWand, type MaskOp } from './maskEdit'
 import {
   makeCorner,
   moveAnchor,
+  nearestFraction,
+  pointAtFraction,
   moveHandle,
   nearestOnPath,
   pathLength,
@@ -17,7 +19,7 @@ import {
   type Frame,
   type Path,
 } from './path';
-import { frameOf, RibbonRenderer, type BendMode } from './ribbon';
+import { flatProfile, frameOf, progressAt, RibbonRenderer, type BendMode, type WidthProfile } from './ribbon';
 import { makeSample } from './sample';
 
 const MAX_SIDE = 2400;
@@ -61,10 +63,9 @@ const state = {
   selected: null as number | null,
   bendMode: 'bend' as BendMode,
   fade: 0,
-  /** -1..1, see RibbonOptions.converge. */
-  converge: 0,
-  /** Convergence point relative to the path's end, in the capture-line frame. */
-  focus: { x: 0, y: 0 } as Vec,
+  width: flatProfile() as WidthProfile,
+  /** Tail offset from the path's end, in the capture-line frame. */
+  shift: { x: 0, y: 0 } as Vec,
   bg: 'image' as 'image' | 'transparent' | 'color',
   bgColor: '#f4f1ea',
   subjectTop: true,
@@ -77,6 +78,8 @@ const state = {
   pendingMask: null as Mask | null,
   pointer: null as Vec | null,
   busy: false,
+  /** What the current photo came from; a cut-out is kept to match against a later photo. */
+  source: null as null | { kind: 'photo'; scale: number } | { kind: 'cutout'; scale: number; cutout: Loaded },
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -101,7 +104,11 @@ const inputs = {
   holes: $<HTMLSelectElement>('#holes'),
   bend: $<HTMLSelectElement>('#bend'),
   fade: $<HTMLInputElement>('#fade'),
-  converge: $<HTMLInputElement>('#converge'),
+  wStart: $<HTMLInputElement>('#w-start'),
+  wEnd: $<HTMLInputElement>('#w-end'),
+  wFrom: $<HTMLInputElement>('#w-from'),
+  wTo: $<HTMLInputElement>('#w-to'),
+  wCurve: $<HTMLSelectElement>('#w-curve'),
   engine: $<HTMLSelectElement>('#engine'),
   tol: $<HTMLInputElement>('#tol'),
   brush: $<HTMLInputElement>('#brush'),
@@ -176,7 +183,7 @@ function resetCaptureFor(doc: Doc) {
   if (!doc.circle) return;
   state.params = { ...state.params, offset: 0, trimStart: 0, trimEnd: 1 };
   state.path = straightPath(Math.round(doc.circle.r * 0.9));
-  state.focus = { x: 0, y: 0 };
+  state.shift = { x: 0, y: 0 };
   state.selected = null;
 }
 
@@ -218,8 +225,8 @@ interface Snapshot {
   srcMask: Mask | null;
   params: CaptureParams;
   path: Path;
-  converge: number;
-  focus: Vec;
+  width: WidthProfile;
+  shift: Vec;
 }
 
 const undoStack: Snapshot[] = [];
@@ -230,8 +237,8 @@ const snapshot = (): Snapshot => ({
   srcMask: state.doc?.srcMask ?? null,
   params: state.params,
   path: state.path,
-  converge: state.converge,
-  focus: state.focus,
+  width: state.width,
+  shift: state.shift,
 });
 
 /** Remember the current state before a change. Rapid changes with the same key coalesce. */
@@ -250,8 +257,8 @@ function checkpoint(key = '') {
 function restoreSnapshot(s: Snapshot) {
   state.params = s.params;
   state.path = s.path;
-  state.converge = s.converge;
-  state.focus = s.focus;
+  state.width = s.width;
+  state.shift = s.shift;
   state.selected = null;
   if (state.doc && s.srcMask !== state.doc.srcMask) applyMask(state.doc, s.srcMask);
   state.captureDirty = true;
@@ -290,20 +297,115 @@ function updateHistoryButtons() {
 // ---------------------------------------------------------------------------------------------
 // Loading and subject selection
 
-async function loadBlob(blob: Blob) {
+interface Loaded {
+  canvas: HTMLCanvasElement;
+  data: ImageData;
+  /** Working size ÷ original size. */
+  scale: number;
+  cutout: boolean;
+}
+
+async function decode(blob: Blob): Promise<Loaded> {
   const bmp = await createImageBitmap(blob);
-  const k = Math.min(1, MAX_SIDE / Math.max(bmp.width, bmp.height));
-  const src = canvasOf(Math.round(bmp.width * k), Math.round(bmp.height * k));
-  const sctx = src.getContext('2d', { willReadFrequently: true })!;
-  sctx.drawImage(bmp, 0, 0, src.width, src.height);
-  const data = sctx.getImageData(0, 0, src.width, src.height);
-  // A cut-out (e.g. "Copy Subject" from Apple Photos) already is the subject: use its alpha.
-  const cutout = hasTransparency(data);
-  state.padPct = cutout ? 100 : 0;
-  if (cutout && state.bg === 'image') state.bg = 'transparent';
+  const scale = Math.min(1, MAX_SIDE / Math.max(bmp.width, bmp.height));
+  const canvas = canvasOf(Math.round(bmp.width * scale), Math.round(bmp.height * scale));
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+  ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  return { canvas, data, scale, cutout: hasTransparency(data) };
+}
+
+/**
+ * Any image the user drops, pastes or picks. A full photo becomes the photo; a cut-out (e.g.
+ * "Copy Subject" from Apple Photos) is matched against the current photo so it becomes the mask
+ * and the background stays. Without a photo to match, the cut-out is used on its own — and if a
+ * photo arrives later, the cut-out is matched against that photo instead.
+ */
+async function loadBlob(blob: Blob) {
+  const img = await decode(blob);
+  const src = state.source;
+
+  if (img.cutout) {
+    if (state.doc && src?.kind === 'photo') {
+      const placed = await placeCutout(img, src);
+      if (placed) {
+        checkpoint();
+        setMask(placed.mask);
+        setTool('move');
+        flash(placed.message, 6000);
+        return;
+      }
+      const alone = await ask('在目前的照片裡找不到這個主體。要改成單獨使用這張去背圖嗎？（原背景不會保留）', '單獨使用', '取消');
+      if (!alone) return;
+    }
+    state.source = { kind: 'cutout', scale: img.scale, cutout: img };
+    state.padPct = 100;
+    if (state.bg === 'image') state.bg = 'transparent';
+    clearHistory();
+    setDoc(img.canvas, maskFromImageData(img.data), { resetView: true, resetPath: true });
+    setTool('move');
+    flash('已載入去背主體。要保留原背景的話，再貼上（或拖進）完整的原圖，會自動對位。', 7000);
+    return;
+  }
+
+  const previousCutout = src?.kind === 'cutout' ? src.cutout : null;
+  state.source = { kind: 'photo', scale: img.scale };
+  state.padPct = 0;
+  if (previousCutout && state.bg === 'transparent') state.bg = 'image';
   clearHistory();
-  setDoc(src, cutout ? maskFromImageData(data) : null, { resetView: true, resetPath: true });
-  setTool(cutout ? 'move' : 'pick');
+  setDoc(img.canvas, null, { resetView: true, resetPath: true });
+  if (previousCutout) {
+    const placed = await placeCutout(previousCutout, state.source);
+    if (placed) {
+      setMask(placed.mask);
+      setTool('move');
+      flash(placed.message, 6000);
+      return;
+    }
+  }
+  setTool('pick');
+}
+
+/** Match a cut-out against the current photo and turn it into a photo-sized mask. */
+async function placeCutout(cut: Loaded, photo: { scale: number }): Promise<{ mask: Mask; message: string } | null> {
+  const doc = state.doc!;
+  flash('正在找主體在原圖中的位置…', 0);
+  await new Promise((r) => setTimeout(r, 30)); // let the message paint
+  const { alignCutout, GOOD_MATCH } = await import('./align');
+  // Same original resolution is the usual case (both copied from Photos), so try that first.
+  const place = alignCutout(doc.srcData, cut.data, [photo.scale / cut.scale]);
+  if (!place || place.error > GOOD_MATCH) {
+    flash('對位失敗。');
+    return null;
+  }
+  const c = canvasOf(doc.src.width, doc.src.height);
+  const ctx = c.getContext('2d', { willReadFrequently: true })!;
+  ctx.drawImage(cut.canvas, place.x, place.y, cut.canvas.width * place.scale, cut.canvas.height * place.scale);
+  const id = ctx.getImageData(0, 0, c.width, c.height);
+  const mask = { w: c.width, h: c.height, data: new Uint8Array(c.width * c.height) };
+  for (let i = 0; i < mask.data.length; i++) mask.data[i] = id.data[i * 4 + 3];
+  return { mask, message: `已把去背主體對齊到原圖上（色差 ${place.error.toFixed(1)}），背景保留。` };
+}
+
+/** A small in-page yes/no dialog. */
+function ask(message: string, yes: string, no: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const box = document.createElement('div');
+    box.className = 'ask';
+    box.innerHTML = `<div class="ask-card"><p></p><div class="row"><button class="btn primary"></button><button class="btn"></button></div></div>`;
+    box.querySelector('p')!.textContent = message;
+    const [ok, cancel] = box.querySelectorAll('button');
+    ok.textContent = yes;
+    cancel.textContent = no;
+    const done = (v: boolean) => {
+      box.remove();
+      resolve(v);
+    };
+    ok.addEventListener('click', () => done(true));
+    cancel.addEventListener('click', () => done(false));
+    document.body.appendChild(box);
+    ok.focus();
+  });
 }
 
 async function loadMaskBlob(blob: Blob) {
@@ -427,14 +529,17 @@ function renderComposite() {
   }
 }
 
-const ribbonOptions = () => ({ mode: state.bendMode, fade: state.fade, converge: state.converge, focus: state.focus });
+const ribbonOptions = () => ({ mode: state.bendMode, fade: state.fade, width: state.width, shift: state.shift });
 
-/** The centre of the ribbon's tail; with convergence it is the point everything gathers toward. */
+/** The centre of the ribbon's tail (where it gathers when it converges to a point). */
 function tailCenter(): Vec {
   const end = state.path[state.path.length - 1].p;
-  const k = Math.max(0, state.converge);
-  return { x: end.x + state.focus.x * k, y: end.y + state.focus.y * k };
+  const k = progressAt(state.width, 1);
+  return { x: end.x + state.shift.x * k, y: end.y + state.shift.y * k };
 }
+
+/** Transition markers that are currently meaningful. */
+const transitionMarks = (): ('from' | 'to')[] => (state.width.curve === 'step' ? ['from'] : ['from', 'to']);
 
 let checker: CanvasPattern | null = null;
 function checkerPattern(): CanvasPattern {
@@ -647,10 +752,30 @@ function drawOverlay() {
     strokeOutlined(1.5, state.selected === i ? '#fff' : ACCENT);
   });
 
-  // Convergence point: where the strip gathers. Free to drag anywhere.
-  if (state.converge > 0) {
-    const end = W(path[path.length - 1].p);
-    const f = W(tailCenter());
+  // Where the width transition starts and ends, on the path.
+  for (const which of transitionMarks()) {
+    const local = pointAtFraction(path, state.width[which]);
+    const m = W(local);
+    vctx.beginPath();
+    vctx.arc(m.x, m.y, 6, 0, Math.PI * 2);
+    vctx.fillStyle = '#1d1d1f';
+    vctx.fill();
+    strokeOutlined(1.5, '#5ef0ff');
+    vctx.fillStyle = '#5ef0ff';
+    vctx.font = '600 10px system-ui, sans-serif';
+    vctx.textAlign = 'center';
+    vctx.textBaseline = 'middle';
+    vctx.fillText(which === 'from' ? '始' : '終', m.x, m.y - 14);
+  }
+
+  // Tail centre: drag it anywhere to move where the ribbon ends up.
+  const end = W(path[path.length - 1].p);
+  const f = W(tailCenter());
+  if (dist(end, f) < 4) {
+    vctx.beginPath();
+    vctx.arc(f.x, f.y, 11, 0, Math.PI * 2);
+    strokeOutlined(2, '#5ef0ff');
+  } else {
     vctx.beginPath();
     vctx.moveTo(end.x, end.y);
     vctx.lineTo(f.x, f.y);
@@ -660,10 +785,6 @@ function drawOverlay() {
     vctx.fillStyle = '#5ef0ff';
     vctx.fill();
     strokeOutlined(1.5, '#fff');
-    vctx.beginPath();
-    vctx.arc(f.x, f.y, 2, 0, Math.PI * 2);
-    vctx.fillStyle = '#1d1d1f';
-    vctx.fill();
   }
 }
 
@@ -701,6 +822,7 @@ function setViewMode(mode: ViewMode, auto = false) {
 
 type Hit =
   | { kind: 'focus' }
+  | { kind: 'mark'; which: 'from' | 'to' }
   | { kind: 'handle'; i: number; which: 'hin' | 'hout' }
   | { kind: 'anchor'; i: number }
   | { kind: 'trim'; which: 'trimStart' | 'trimEnd' }
@@ -718,7 +840,15 @@ function hitTest(screen: Vec): Hit {
   const S = (v: Vec) => toScreen(toWorld(frame, v));
   const path = state.path;
 
-  if (state.converge > 0 && dist(S(tailCenter()), screen) < HIT) return { kind: 'focus' };
+  for (const which of transitionMarks()) {
+    if (dist(S(pointAtFraction(path, state.width[which])), screen) < HIT) return { kind: 'mark', which };
+  }
+  {
+    // Unmoved, the tail handle is a ring around the last anchor: ring = tail, centre = anchor.
+    const d = dist(S(tailCenter()), screen);
+    const onAnchor = dist(S(tailCenter()), S(path[path.length - 1].p)) < 4;
+    if (onAnchor ? d > 6 && d < 15 : d < HIT) return { kind: 'focus' };
+  }
   for (let i = path.length - 1; i >= 0; i--) {
     for (const which of ['hout', 'hin'] as const) {
       if (i === 0 && which === 'hin') continue;
@@ -746,6 +876,7 @@ function hitTest(screen: Vec): Hit {
 
 type Drag =
   | { kind: 'focus'; grab: Vec }
+  | { kind: 'mark'; which: 'from' | 'to' }
   | { kind: 'handle'; i: number; which: 'hin' | 'hout' }
   | { kind: 'anchor'; i: number; grab: Vec }
   | { kind: 'pull'; i: number; start: Vec }
@@ -804,6 +935,9 @@ view.addEventListener('pointerdown', (e) => {
   switch (hit.kind) {
     case 'focus':
       drag = { kind: 'focus', grab: sub(tailCenter(), toLocal(frame!, world)) };
+      break;
+    case 'mark':
+      drag = { kind: 'mark', which: hit.which };
       break;
     case 'handle':
       state.selected = hit.i;
@@ -887,10 +1021,13 @@ view.addEventListener('pointermove', (e) => {
     case 'focus': {
       const target = add(toLocal(frame!, world), drag.grab);
       const end = state.path[state.path.length - 1].p;
-      const k = Math.max(1e-3, state.converge);
-      state.focus = { x: (target.x - end.x) / k, y: (target.y - end.y) / k };
+      const k = Math.max(1e-3, progressAt(state.width, 1));
+      state.shift = { x: (target.x - end.x) / k, y: (target.y - end.y) / k };
       break;
     }
+    case 'mark':
+      state.width = { ...state.width, [drag.which]: nearestFraction(state.path, toLocal(frame!, world)) };
+      break;
     case 'handle': {
       let local = toLocal(frame!, world);
       // The ribbon leaves the capture line square-on, so the first handle only slides outward.
@@ -965,6 +1102,7 @@ function updateCursor(screen: Vec) {
   const hit = hitTest(screen);
   const cursors: Record<Hit['kind'], string> = {
     focus: 'move',
+    mark: 'ew-resize',
     handle: 'pointer',
     anchor: 'move',
     trim: 'ew-resize',
@@ -1029,7 +1167,12 @@ function syncPanel() {
   inputs.holes.value = state.params.holes;
   inputs.bend.value = state.bendMode;
   inputs.fade.value = String(state.fade * 100);
-  inputs.converge.value = String(state.converge * 100);
+  inputs.wStart.value = String(state.width.start * 100);
+  inputs.wEnd.value = String(state.width.end * 100);
+  inputs.wFrom.value = String(state.width.from * 100);
+  inputs.wTo.value = String(state.width.to * 100);
+  inputs.wCurve.value = state.width.curve;
+  $<HTMLElement>('#w-to-field').style.display = state.width.curve === 'step' ? 'none' : '';
   inputs.engine.value = state.engine;
   inputs.tol.value = String(state.tolerance);
   inputs.brush.value = String(state.brushSize);
@@ -1062,8 +1205,11 @@ function updateReadouts() {
   $<HTMLOutputElement>('#inset-out').textContent = `${state.params.inset} px`;
   $<HTMLOutputElement>('#smooth-out').textContent = `${state.params.smooth} px`;
   $<HTMLOutputElement>('#fade-out').textContent = `${Math.round(state.fade * 100)}%`;
-  const c = Math.round(state.converge * 100);
-  $<HTMLOutputElement>('#converge-out').textContent = c > 0 ? `收斂 ${c}%` : c < 0 ? `擴散 ${-c}%` : '無';
+  const pct = (v: number) => `${Math.round(v * 100)}%`;
+  $<HTMLOutputElement>('#w-start-out').textContent = pct(state.width.start);
+  $<HTMLOutputElement>('#w-end-out').textContent = pct(state.width.end);
+  $<HTMLOutputElement>('#w-from-out').textContent = pct(state.width.from);
+  $<HTMLOutputElement>('#w-to-out').textContent = pct(state.width.to);
   $<HTMLOutputElement>('#tol-out').textContent = String(state.tolerance);
   $<HTMLOutputElement>('#brush-out').textContent = `${state.brushSize} px`;
   $<HTMLOutputElement>('#pad-out').textContent = `${state.padPct}%`;
@@ -1101,15 +1247,36 @@ function bindSetting(el: HTMLInputElement | HTMLSelectElement, apply: (v: string
 
 bindSetting(inputs.bend, (v) => (state.bendMode = v as BendMode));
 bindSetting(inputs.fade, (v) => (state.fade = Number(v) / 100));
-inputs.converge.addEventListener('input', () => {
-  checkpoint('converge');
-  state.converge = Number(inputs.converge.value) / 100;
-  updateReadouts();
-  render();
-});
-$<HTMLButtonElement>('#reset-focus').addEventListener('click', () => {
+/** Width profile controls: undoable, but nothing to re-capture. */
+function bindWidth(el: HTMLInputElement | HTMLSelectElement, apply: (v: string) => Partial<WidthProfile>) {
+  el.addEventListener('input', () => {
+    checkpoint(el.id);
+    state.width = { ...state.width, ...apply(el.value) };
+    syncPanel();
+    render();
+  });
+}
+bindWidth(inputs.wStart, (v) => ({ start: Number(v) / 100 }));
+bindWidth(inputs.wEnd, (v) => ({ end: Number(v) / 100 }));
+bindWidth(inputs.wFrom, (v) => ({ from: Number(v) / 100 }));
+bindWidth(inputs.wTo, (v) => ({ to: Number(v) / 100 }));
+bindWidth(inputs.wCurve, (v) => ({ curve: v as WidthProfile['curve'] }));
+document.querySelectorAll<HTMLButtonElement>('[data-width-preset]').forEach((b) =>
+  b.addEventListener('click', () => {
+    checkpoint();
+    const presets: Record<string, Partial<WidthProfile>> = {
+      flat: { start: 1, end: 1 },
+      point: { start: 1, end: 0 },
+      fan: { start: 1, end: 2 },
+    };
+    state.width = { ...state.width, ...presets[b.dataset.widthPreset!] };
+    syncPanel();
+    render();
+  }),
+);
+$<HTMLButtonElement>('#reset-tail').addEventListener('click', () => {
   checkpoint();
-  state.focus = { x: 0, y: 0 };
+  state.shift = { x: 0, y: 0 };
   render();
 });
 bindSetting(inputs.engine, (v) => {
@@ -1145,6 +1312,7 @@ $<HTMLInputElement>('#mask-file').addEventListener('change', (e) => {
 });
 $<HTMLButtonElement>('#sample').addEventListener('click', () => {
   const { image, mask } = makeSample();
+  state.source = { kind: 'photo', scale: 1 };
   state.padPct = 0;
   clearHistory();
   setDoc(image, mask, { resetView: true, resetPath: true });

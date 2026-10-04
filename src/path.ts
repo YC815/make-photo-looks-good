@@ -203,3 +203,31 @@ export function makeCorner(path: Path, i: number): Path {
 export function pathLength(path: Path): number {
   return flatten(path, 2).length;
 }
+
+/** Point at a fraction (0..1) of the path's length. */
+export function pointAtFraction(path: Path, f: number): Vec {
+  const { points } = flatten(path, 2);
+  const target = Math.max(0, Math.min(1, f)) * pathLength(path);
+  let acc = 0;
+  for (let i = 1; i < points.length; i++) {
+    const d = dist(points[i - 1], points[i]);
+    if (acc + d >= target && d > 0) return lerp(points[i - 1], points[i], (target - acc) / d);
+    acc += d;
+  }
+  return points[points.length - 1];
+}
+
+/** Fraction (0..1) of the path's length at the point closest to q. */
+export function nearestFraction(path: Path, q: Vec): number {
+  const { points, length } = flatten(path, 2);
+  if (length <= 0) return 0;
+  let best = { d: Infinity, at: 0 };
+  let acc = 0;
+  for (let i = 1; i < points.length; i++) {
+    const seg = dist(points[i - 1], points[i]);
+    const r = distToSegment(q, points[i - 1], points[i]);
+    if (r.d < best.d) best = { d: r.d, at: acc + r.t * seg };
+    acc += seg;
+  }
+  return best.at / length;
+}

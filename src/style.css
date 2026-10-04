@@ -331,3 +331,31 @@ details summary {
   cursor: pointer;
   text-decoration: underline;
 }
+
+.btn.small {
+  padding: 4px 9px;
+  font-size: 12px;
+}
+
+.ask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: grid;
+  place-items: center;
+  z-index: 10;
+}
+
+.ask-card {
+  background: var(--panel);
+  border-radius: 12px;
+  padding: 18px 20px;
+  max-width: 360px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.ask-card p {
+  margin: 0 0 14px;
+}

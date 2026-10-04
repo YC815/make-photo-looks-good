@@ -15,24 +15,44 @@ export interface RibbonOptions {
   mode: BendMode;
   /** Fraction (0..1) of the ribbon's length over which it fades out at the tail. */
   fade: number;
-  /**
-   * -1..1. Positive: the strip narrows toward the tail and gathers at the convergence point
-   * (1 = all columns meet in one point). Negative: it fans out instead.
-   */
-  converge: number;
-  /** Where the strip gathers, relative to the path's end point, in the capture-line frame. */
-  focus: Vec;
+  width: WidthProfile;
+  /** How far the tail is moved off the path, in the capture-line frame; eased in like the width. */
+  shift: Vec;
 }
 
 /**
- * Where a column ends up at arc fraction s: the spine point, the column's offset scaled by the
- * convergence, and a growing shift toward the convergence point.
+ * Width along the ribbon: `start` before the transition, `end` after it (1 = the captured line's
+ * width; below 1 converges, above 1 fans out). The transition runs between the arc fractions
+ * `from` and `to`, either eased (`smooth`), straight with hard corners (`linear`), or as an
+ * instant jump at `from` (`step`).
  */
-export function ribbonPoint(p: Vec, nrm: Vec, t: number, s: number, converge: number, focusWorld: Vec): Vec {
-  const k = converge * s;
-  const w = 1 - k;
-  const shift = Math.max(0, k);
-  return { x: p.x + nrm.x * t * w + focusWorld.x * shift, y: p.y + nrm.y * t * w + focusWorld.y * shift };
+export interface WidthProfile {
+  start: number;
+  end: number;
+  from: number;
+  to: number;
+  curve: 'smooth' | 'linear' | 'step';
+}
+
+export const flatProfile = (): WidthProfile => ({ start: 1, end: 1, from: 0, to: 1, curve: 'smooth' });
+
+/** Transition progress (0..1) at arc fraction s. */
+export function progressAt(w: WidthProfile, s: number): number {
+  const a = Math.min(w.from, w.to);
+  const b = Math.max(w.from, w.to);
+  if (w.curve === 'step' || b - a < 1e-6) return s >= a ? 1 : 0;
+  const u = Math.max(0, Math.min(1, (s - a) / (b - a)));
+  return w.curve === 'smooth' ? u * u * (3 - 2 * u) : u;
+}
+
+export const widthAt = (w: WidthProfile, s: number) => {
+  const p = progressAt(w, s);
+  return Math.max(0, w.start + (w.end - w.start) * p);
+};
+
+/** Where column offset t lands: the spine point, the scaled offset, plus the eased tail shift. */
+export function ribbonPoint(p: Vec, nrm: Vec, t: number, width: number, shift: Vec, progress: number): Vec {
+  return { x: p.x + nrm.x * t * width + shift.x * progress, y: p.y + nrm.y * t * width + shift.y * progress };
 }
 
 const VERT = `#version 300 es
@@ -223,8 +243,10 @@ export class RibbonRenderer {
       const total = Math.max(line.length, 1e-6);
       const along: number[] = [0];
       for (let k = 1; k < pts.length; k++) along.push(along[k - 1] + Math.hypot(pts[k].x - pts[k - 1].x, pts[k].y - pts[k - 1].y));
-      const focus = dirToWorld(frame, opts.focus);
-      const at = (k: number, t: number) => ribbonPoint(pts[k], nrms[k], t, along[k] / total, opts.converge, focus);
+      const shift = dirToWorld(frame, opts.shift);
+      const sOf = (k: number) => along[k] / total;
+      const at = (k: number, t: number) =>
+        ribbonPoint(pts[k], nrms[k], t, widthAt(opts.width, sOf(k)), shift, progressAt(opts.width, sOf(k)));
 
       if (opts.mode === 'bend') {
         // Two half-ribbons with depth = distance from the spine; the depth test then keeps, for
@@ -233,8 +255,7 @@ export class RibbonRenderer {
         // ribbon or wrap around its tail.
         // Depth is the true distance from the spine, scaled so the widest point maps to 1.
         const last = pts.length - 1;
-        const widthAt = (s: number) => Math.max(0, 1 - opts.converge * s);
-        const reach = half * Math.max(1, widthAt(1));
+        const reach = Math.max(1e-3, half * Math.max(opts.width.start, opts.width.end));
         cone(caps, at(0, 0), reach, reach);
         cone(caps, at(last, 0), reach, reach);
         for (const side of [-1, 1]) {
@@ -242,7 +263,7 @@ export class RibbonRenderer {
           for (let k = 0; k < pts.length; k++) {
             const s = along[k] / total;
             ribbon.push(at(k, 0), 0.5, 0, s);
-            ribbon.push(at(k, side * half), side < 0 ? 0 : 1, (half * widthAt(s)) / reach, s);
+            ribbon.push(at(k, side * half), side < 0 ? 0 : 1, (half * widthAt(opts.width, s)) / reach, s);
           }
           strips.push([begin, ribbon.count - begin]);
         }

@@ -56,8 +56,10 @@
           <p class="note" id="mask-status">尚未有主體。</p>
           <div class="row">
             <button class="btn" id="pick">在畫面上點選主體</button>
+            <label class="btn">選擇去背主體<input type="file" accept="image/png,image/webp,image/heic" data-role="open" hidden /></label>
             <label class="btn">匯入遮罩<input type="file" accept="image/png" id="mask-file" hidden /></label>
           </div>
+          <p class="note">三種方式：在網頁上點一下讓 AI 抓；或貼上（⌘V）已經去背的主體，例如 Apple「照片」長按主體 →「拷貝」。已經有原圖的話，去背主體會自動對位到原圖上，背景會保留；先貼主體、再貼原圖也可以。</p>
 
           <h3>修邊</h3>
           <div class="row">
@@ -79,16 +81,6 @@
           </label>
           <p class="note">擦除時會切到「只看主體」，比較容易看出背景有沒有去乾淨；復原時會切到「遮罩」，紅色的部分是目前被當成背景的區域。按 B 可以自己切換檢視。</p>
 
-          <details>
-            <summary>想用 Apple 的主體辨識？</summary>
-            <p class="note">
-              Apple「照片」的長按抓主體背後是 Vision 框架，只有 Apple 平台能呼叫，所以有兩條路：
-            </p>
-            <ol class="note">
-              <li>在「照片」長按主體 → 拷貝 → 回到這裡貼上。去背結果直接當主體用（沒有原背景）。</li>
-              <li>在 Mac 上執行 <code>tools/apple-vision-mask</code> 產生同尺寸遮罩，再按「匯入遮罩」，就能保留原背景。</li>
-            </ol>
-          </details>
         </section>
 
         <section data-needs="subject">
@@ -131,10 +123,32 @@
               <option value="translate">平移（像扁筆刷）</option>
             </select>
           </label>
-          <label class="field">收斂／聚攏 <output id="converge-out"></output>
-            <input type="range" id="converge" min="-100" max="100" step="1" />
+          <h3>寬度</h3>
+          <div class="row">
+            <button class="btn small" data-width-preset="flat">等寬</button>
+            <button class="btn small" data-width-preset="point">收斂成一點</button>
+            <button class="btn small" data-width-preset="fan">擴散</button>
+          </div>
+          <label class="field">起點寬度 <output id="w-start-out"></output>
+            <input type="range" id="w-start" min="0" max="300" step="1" />
           </label>
-          <p class="note">往右是越拉越窄、聚到一點，往左則是越拉越寬。收斂時尾端會出現青色圓點（聚攏點），可以拖到任何位置。<button class="link" id="reset-focus">聚攏點歸位</button></p>
+          <label class="field">終點寬度 <output id="w-end-out"></output>
+            <input type="range" id="w-end" min="0" max="300" step="1" />
+          </label>
+          <label class="field">過渡方式
+            <select id="w-curve">
+              <option value="smooth">平滑過渡</option>
+              <option value="linear">直線過渡（轉角是硬的）</option>
+              <option value="step">直接硬切（在「始」點瞬間改變）</option>
+            </select>
+          </label>
+          <label class="field">過渡開始 <output id="w-from-out"></output>
+            <input type="range" id="w-from" min="0" max="100" step="0.5" />
+          </label>
+          <label class="field" id="w-to-field">過渡結束 <output id="w-to-out"></output>
+            <input type="range" id="w-to" min="0" max="100" step="0.5" />
+          </label>
+          <p class="note">100%＝擷取線原本的寬度；低於 100% 是收斂，高於 100% 是擴散。路徑上的「始」「終」兩點可以直接拖。尾端的青色圓點可以拖到任何位置，讓色帶在過渡時平移過去（聚攏點）。<button class="link" id="reset-tail">尾端歸位</button></p>
           <label class="field">尾端淡出 <output id="fade-out"></output>
             <input type="range" id="fade" min="0" max="100" step="1" />
           </label>

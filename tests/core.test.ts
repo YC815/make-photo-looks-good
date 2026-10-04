@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { capture, smoothStrip } from '../src/capture';
-import { ribbonPoint } from '../src/ribbon';
+import { progressAt, ribbonPoint, widthAt } from '../src/ribbon';
 import { convexHull, dist, minEnclosingCircle, type Vec } from '../src/geometry';
 import { enclosingCircle, type Mask } from '../src/mask';
-import { cubicPoint, flatten, moveHandle, nearestOnPath, pathLength, splitSegment, straightPath, type Path } from '../src/path';
+import { cubicPoint, flatten, moveHandle, nearestFraction, nearestOnPath, pathLength, pointAtFraction, splitSegment, straightPath, type Path } from '../src/path';
 
 function seeded(seed: number) {
   return () => {
@@ -224,6 +224,17 @@ describe('path', () => {
     }
   });
 
+  it('maps between points and length fractions', () => {
+    const path: Path = [
+      { p: { x: 0, y: 0 }, hin: { x: 0, y: 0 }, hout: { x: 0, y: 0 }, smooth: false },
+      { p: { x: 100, y: 0 }, hin: { x: 100, y: 0 }, hout: { x: 100, y: 0 }, smooth: false },
+      { p: { x: 100, y: 100 }, hin: { x: 100, y: 100 }, hout: { x: 100, y: 100 }, smooth: false },
+    ];
+    expect(dist(pointAtFraction(path, 0.75), { x: 100, y: 50 })).toBeLessThan(0.5);
+    expect(nearestFraction(path, { x: 110, y: 50 })).toBeCloseTo(0.75, 2);
+    expect(nearestFraction(path, { x: -20, y: 5 })).toBe(0);
+  });
+
   it('finds the nearest segment', () => {
     const near = nearestOnPath(straightPath(100), { x: 40, y: 3 });
     expect(near.seg).toBe(0);
@@ -232,20 +243,31 @@ describe('path', () => {
   });
 });
 
-describe('ribbonPoint (convergence)', () => {
-  const p = { x: 100, y: 0 };
-  const n = { x: 0, y: 1 };
-  const focus = { x: 0, y: 40 };
+describe('width profile', () => {
+  const base = { start: 1, end: 0, from: 0.2, to: 0.6, curve: 'linear' as const };
 
-  it('leaves the start untouched', () => {
-    expect(ribbonPoint(p, n, 30, 0, 1, focus)).toEqual({ x: 100, y: 30 });
+  it('holds the start width before the transition and the end width after it', () => {
+    expect(widthAt(base, 0.1)).toBe(1);
+    expect(widthAt(base, 0.4)).toBeCloseTo(0.5);
+    expect(widthAt(base, 0.9)).toBe(0);
   });
 
-  it('full convergence gathers every column at the focus point', () => {
-    for (const t of [-50, 0, 50]) expect(ribbonPoint(p, n, t, 1, 1, focus)).toEqual({ x: 100, y: 40 });
+  it('smooth eases, step jumps at the start of the transition', () => {
+    expect(progressAt({ ...base, curve: 'smooth' }, 0.25)).toBeLessThan(progressAt(base, 0.25));
+    expect(progressAt({ ...base, curve: 'smooth' }, 0.4)).toBeCloseTo(0.5);
+    expect(progressAt({ ...base, curve: 'step' }, 0.19)).toBe(0);
+    expect(progressAt({ ...base, curve: 'step' }, 0.2)).toBe(1);
   });
 
-  it('negative convergence fans out and ignores the focus', () => {
-    expect(ribbonPoint(p, n, 30, 1, -0.5, focus)).toEqual({ x: 100, y: 45 });
+  it('accepts from/to in either order', () => {
+    expect(progressAt({ ...base, from: 0.6, to: 0.2 }, 0.4)).toBeCloseTo(0.5);
+  });
+
+  it('places columns by width and shift', () => {
+    const p = { x: 100, y: 0 };
+    const n = { x: 0, y: 1 };
+    expect(ribbonPoint(p, n, 30, 1, { x: 0, y: 40 }, 0)).toEqual({ x: 100, y: 30 });
+    for (const t of [-50, 0, 50]) expect(ribbonPoint(p, n, t, 0, { x: 0, y: 40 }, 1)).toEqual({ x: 100, y: 40 });
+    expect(ribbonPoint(p, n, 30, 1.5, { x: 0, y: 0 }, 1)).toEqual({ x: 100, y: 45 });
   });
 });
