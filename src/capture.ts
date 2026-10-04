@@ -13,6 +13,22 @@ export interface CaptureParams {
   inset: number;
   /** Average each column with its neighbours (radius in columns) to calm noisy edges. */
   smooth: number;
+  /**
+   * Gaps the ray finds behind the first subject pixel: leave them, fill them with the colour of
+   * the inner wall (each inner surface stretches too), or let the outer colour run through.
+   */
+  holes: HoleMode;
+}
+
+export type HoleMode = 'empty' | 'inner' | 'outer';
+
+/** A stretch of background enclosed by the subject along one column's ray. */
+export interface Hole {
+  col: number;
+  /** End nearest the capture line. */
+  from: Vec;
+  /** Inner wall. */
+  to: Vec;
 }
 
 export interface Column {
@@ -41,6 +57,9 @@ export interface Capture {
   columns: Column[];
   /** RGBA (straight alpha), one texel per column; alpha 0 where nothing was hit. */
   colors: Uint8ClampedArray;
+  holes: Hole[];
+  /** RGBA per hole. */
+  holeColors: Uint8ClampedArray;
 }
 
 const STEP = 0.5;
@@ -60,7 +79,8 @@ export function captureLine(circle: Circle, p: CaptureParams): Pick<Capture, 'di
 
 /**
  * Look at the subject from one side: every column of the capture line casts a ray toward the
- * subject and keeps the colour of the first subject pixel it meets.
+ * subject and keeps the colour of the first subject pixel it meets. The ray keeps going so that
+ * gaps enclosed by the subject (between petals, inside a handle…) can be filled as well.
  */
 export function capture(image: ImageData, mask: Mask, circle: Circle, p: CaptureParams): Capture {
   const line = captureLine(circle, p);
@@ -68,43 +88,68 @@ export function capture(image: ImageData, mask: Mask, circle: Circle, p: Capture
   const width = Math.max(1, Math.round(t1 - t0));
   const columns: Column[] = [];
   const colors = new Uint8ClampedArray(width * 4);
+  const holes: Hole[] = [];
+  const holeRGBA: number[] = [];
   const maxSteps = Math.ceil((2 * circle.r - p.offset + 4) / STEP);
   const { data, width: iw } = image;
+  const at = (o: Vec, k: number): Vec => ({ x: o.x - dir.x * k * STEP, y: o.y - dir.y * k * STEP });
+
+  /** Colour `inset` px deeper than step k, without walking out the other side of a thin part. */
+  const sample = (o: Vec, k: number): number => {
+    let q = at(o, k);
+    for (let s = 1; s <= p.inset / STEP; s++) {
+      const next = at(o, k + s);
+      if (!isSubject(mask, next.x, next.y)) break;
+      q = next;
+    }
+    return (Math.floor(q.y) * iw + Math.floor(q.x)) * 4;
+  };
 
   for (let i = 0; i < width; i++) {
     const t = t0 + ((i + 0.5) * (t1 - t0)) / width;
     const start = add(base, scale(normal, t));
-    let edge: Vec | null = null;
-    let k = 0;
-    for (; k <= maxSteps; k++) {
-      const x = start.x - dir.x * k * STEP;
-      const y = start.y - dir.y * k * STEP;
-      if (isSubject(mask, x, y)) {
-        edge = { x, y };
-        break;
+    let first = -1;
+    let exit = -1; // step where the ray last left the subject
+    let inside = false;
+    for (let k = 0; k <= maxSteps; k++) {
+      const q = at(start, k);
+      const now = isSubject(mask, q.x, q.y);
+      if (now && !inside) {
+        if (first < 0) first = k;
+        else if (p.holes !== 'empty') {
+          // Back inside after a gap: [exit, k) was a hole hidden behind the subject.
+          holes.push({ col: i, from: at(start, exit - 0.5), to: at(start, k + 0.5) });
+          if (p.holes === 'inner') {
+            const idx = sample(start, k);
+            holeRGBA.push(data[idx], data[idx + 1], data[idx + 2], 255);
+          }
+        }
+      } else if (!now && inside) {
+        exit = k;
       }
+      inside = now;
+      if (first >= 0 && p.holes === 'empty') break;
     }
-    columns.push({ t, line: start, edge });
-    if (!edge) continue;
 
-    // Walk `inset` px deeper, but never out the other side of a thin part.
-    let sx = edge.x;
-    let sy = edge.y;
-    for (let s = 1; s <= p.inset / STEP; s++) {
-      const x = edge.x - dir.x * s * STEP;
-      const y = edge.y - dir.y * s * STEP;
-      if (!isSubject(mask, x, y)) break;
-      sx = x;
-      sy = y;
-    }
-    const idx = (Math.floor(sy) * iw + Math.floor(sx)) * 4;
+    columns.push({ t, line: start, edge: first >= 0 ? at(start, first) : null });
+    if (first < 0) continue;
+    const idx = sample(start, first);
     colors[i * 4] = data[idx];
     colors[i * 4 + 1] = data[idx + 1];
     colors[i * 4 + 2] = data[idx + 2];
     colors[i * 4 + 3] = 255;
   }
 
-  return { ...line, columns, colors: smoothStrip(colors, Math.round(p.smooth)) };
+  const strip = smoothStrip(colors, Math.round(p.smooth));
+  let holeColors: Uint8ClampedArray;
+  if (p.holes === 'outer') {
+    // The outermost colour punches straight through the subject into the gaps.
+    holeColors = new Uint8ClampedArray(holes.length * 4);
+    holes.forEach((h, j) => holeColors.set(strip.subarray(h.col * 4, h.col * 4 + 4), j * 4));
+  } else {
+    holeColors = new Uint8ClampedArray(holeRGBA);
+  }
+  return { ...line, columns, colors: strip, holes, holeColors };
 }
 
 /** Box blur along the strip that only mixes captured columns, so gaps stay transparent. */

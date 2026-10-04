@@ -7,6 +7,15 @@ const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/was
 const MODEL_URL =
   'https://storage.googleapis.com/mediapipe-models/interactive_segmenter/magic_touch/float32/1/magic_touch.tflite';
 
+/**
+ * Confidence → mask. Raw confidences leave unsure areas half transparent (a ghostly vase after an
+ * erase), so commit to a side around 0.5 and keep only a narrow soft band for the edge.
+ */
+function decide(v: number): number {
+  const t = Math.max(0, Math.min(1, (v - 0.4) / 0.2));
+  return t * t * (3 - 2 * t);
+}
+
 let segmenter: Promise<InteractiveSegmenterLegacy> | null = null;
 
 async function load(): Promise<InteractiveSegmenterLegacy> {
@@ -48,7 +57,7 @@ export async function segmentAt(image: HTMLCanvasElement, x: number, y: number):
   for (let py = 0; py < h; py++) {
     for (let px = 0; px < w; px++) {
       const v = at(px, py);
-      data[py * w + px] = Math.round((invert ? 1 - v : v) * 255);
+      data[py * w + px] = Math.round(decide(invert ? 1 - v : v) * 255);
     }
   }
   result.close();

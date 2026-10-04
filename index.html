@@ -20,11 +20,25 @@
           </div>
         </div>
         <div class="toolbar" id="toolbar">
-          <button data-tool="move" title="移動與編輯（V）">移動</button>
-          <button data-tool="pen" title="鋼筆：點一下新增錨點，拖曳拉出把手（P）">鋼筆</button>
-          <button data-tool="pick" title="點選主體（S）">點選主體</button>
-          <span class="sep"></span>
-          <button id="fit" title="置中顯示（0）">置中</button>
+          <div class="group">
+            <button data-tool="move" title="移動與編輯（V）">移動</button>
+            <button data-tool="pen" title="鋼筆：點一下新增錨點，拖曳拉出把手（P）">鋼筆</button>
+          </div>
+          <div class="group">
+            <button data-tool="pick" title="點選主體：點一下，整個重抓（S）">點選主體</button>
+            <button data-tool="erase" title="魔法擦除：把多抓的部分去掉（E）">魔法擦除</button>
+            <button data-tool="restore" title="魔法復原：把漏抓的部分補回（R）">魔法復原</button>
+          </div>
+          <div class="group seg" title="切換檢視（B）">
+            <button data-view="result">成品</button>
+            <button data-view="subject">只看主體</button>
+            <button data-view="mask">遮罩</button>
+          </div>
+          <div class="group">
+            <button id="undo" title="上一步（⌘Z）">↶</button>
+            <button id="redo" title="下一步（⇧⌘Z）">↷</button>
+            <button id="fit" title="置中顯示（0）">置中</button>
+          </div>
         </div>
         <div class="hint" id="hint"></div>
       </section>
@@ -44,6 +58,27 @@
             <button class="btn" id="pick">在畫面上點選主體</button>
             <label class="btn">匯入遮罩<input type="file" accept="image/png" id="mask-file" hidden /></label>
           </div>
+
+          <h3>修邊</h3>
+          <div class="row">
+            <button class="btn" data-tool-btn="erase">魔法擦除</button>
+            <button class="btn" data-tool-btn="restore">魔法復原</button>
+          </div>
+          <label class="field">選取方式
+            <select id="engine">
+              <option value="ai">AI 智慧選取：點一下物件</option>
+              <option value="wand">顏色魔術棒：點一下相近顏色</option>
+              <option value="brush">筆刷：自己塗</option>
+            </select>
+          </label>
+          <label class="field" id="tol-field">顏色容許度 <output id="tol-out"></output>
+            <input type="range" id="tol" min="2" max="150" step="1" />
+          </label>
+          <label class="field" id="brush-field">筆刷大小 <output id="brush-out"></output>
+            <input type="range" id="brush" min="4" max="300" step="1" />
+          </label>
+          <p class="note">擦除時會切到「只看主體」，比較容易看出背景有沒有去乾淨；復原時會切到「遮罩」，紅色的部分是目前被當成背景的區域。按 B 可以自己切換檢視。</p>
+
           <details>
             <summary>想用 Apple 的主體辨識？</summary>
             <p class="note">
@@ -76,12 +111,33 @@
           <label class="field">色帶平滑 <output id="smooth-out"></output>
             <input type="range" id="smooth" min="0" max="30" step="1" />
           </label>
+          <label class="field">主體內部的空隙
+            <select id="holes">
+              <option value="empty">留空</option>
+              <option value="inner">用內側顏色往外延伸</option>
+              <option value="outer">外側顏色貫穿進去</option>
+            </select>
+          </label>
+          <p class="note">空隙是指射線碰到主體之後，在主體後面又遇到的背景（例如花瓣之間）。</p>
           <p class="note">也可以直接在畫面上拖：圓上的 ↻（或虛線圓）轉方向、橘色擷取線前後推、線的兩端調範圍。青色細線就是正在被擷取的外圍像素。</p>
         </section>
 
         <section data-needs="subject">
           <h2><span class="step">4</span>延伸與彎折</h2>
           <p class="note">長度：<strong id="length-out">0</strong> px</p>
+          <label class="field">彎折方式
+            <select id="bend">
+              <option value="bend">跟著轉彎（不摺疊）</option>
+              <option value="translate">平移（像扁筆刷）</option>
+            </select>
+          </label>
+          <label class="field">收斂／聚攏 <output id="converge-out"></output>
+            <input type="range" id="converge" min="-100" max="100" step="1" />
+          </label>
+          <p class="note">往右是越拉越窄、聚到一點，往左則是越拉越寬。收斂時尾端會出現青色圓點（聚攏點），可以拖到任何位置。<button class="link" id="reset-focus">聚攏點歸位</button></p>
+          <label class="field">尾端淡出 <output id="fade-out"></output>
+            <input type="range" id="fade" min="0" max="100" step="1" />
+          </label>
           <div class="row">
             <button class="btn" id="reset-path">重設為直線</button>
             <button class="btn" id="delete-anchor">刪除錨點</button>

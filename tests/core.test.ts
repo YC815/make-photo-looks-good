@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { capture, smoothStrip } from '../src/capture';
+import { ribbonPoint } from '../src/ribbon';
 import { convexHull, dist, minEnclosingCircle, type Vec } from '../src/geometry';
 import { enclosingCircle, type Mask } from '../src/mask';
 import { cubicPoint, flatten, moveHandle, nearestOnPath, pathLength, splitSegment, straightPath, type Path } from '../src/path';
@@ -78,7 +79,7 @@ describe('capture', () => {
   const mask = maskFrom(W, H, (x, y) => (x >= 40 && x < 80 && y >= 40 && y < 160) || (x >= 40 && x < 140 && y >= 120 && y < 160));
   const image = positionImage(W, H);
   const circle = enclosingCircle(mask)!;
-  const base = { angle: 0, offset: 0, trimStart: 0, trimEnd: 1, inset: 0, smooth: 0 };
+  const base = { angle: 0, offset: 0, trimStart: 0, trimEnd: 1, inset: 0, smooth: 0, holes: 'empty' as const };
 
   it('looking from the right finds the outermost pixel of every row', () => {
     const cap = capture(image, mask, circle, base);
@@ -130,6 +131,40 @@ describe('capture', () => {
     expect(cap.columns.length).toBe(Math.round(circle.r * 0.5));
     expect(cap.t0).toBeCloseTo(-circle.r / 2);
     expect(cap.t1).toBeCloseTo(0);
+  });
+});
+
+describe('holes behind the silhouette', () => {
+  // A ring: looking from the right, rows through the middle cross the hole in the centre.
+  const W = 200;
+  const mask = maskFrom(W, W, (x, y) => {
+    const d = Math.hypot(x - 100, y - 100);
+    return d < 60 && d >= 30;
+  });
+  const image = positionImage(W, W);
+  const circle = enclosingCircle(mask)!;
+  const base = { angle: 0, offset: 0, trimStart: 0, trimEnd: 1, inset: 0, smooth: 0, holes: 'empty' as const };
+  const middle = (cap: ReturnType<typeof capture>) => cap.holes.filter((h) => Math.abs(h.from.y - 100.5) < 0.6);
+
+  it('finds nothing when holes are left empty', () => {
+    expect(capture(image, mask, circle, base).holes).toHaveLength(0);
+  });
+
+  it('spans the gap between the two walls', () => {
+    const [hole] = middle(capture(image, mask, circle, { ...base, holes: 'inner' }));
+    expect(hole.from.x).toBeGreaterThan(129);
+    expect(hole.from.x).toBeLessThan(131.5);
+    expect(hole.to.x).toBeGreaterThan(69);
+    expect(hole.to.x).toBeLessThan(71);
+  });
+
+  it('inner mode uses the inner wall colour, outer mode the outermost colour', () => {
+    const inner = capture(image, mask, circle, { ...base, holes: 'inner' });
+    const j = inner.holes.indexOf(middle(inner)[0]);
+    expect(inner.holeColors[j * 4]).toBe(69); // pixel 69 is the last ring pixel before the hole
+    const outer = capture(image, mask, circle, { ...base, holes: 'outer' });
+    const k = outer.holes.indexOf(middle(outer)[0]);
+    expect(outer.holeColors[k * 4]).toBe(159);
   });
 });
 
@@ -194,5 +229,23 @@ describe('path', () => {
     expect(near.seg).toBe(0);
     expect(near.t).toBeCloseTo(0.4, 1);
     expect(near.d).toBeCloseTo(3, 1);
+  });
+});
+
+describe('ribbonPoint (convergence)', () => {
+  const p = { x: 100, y: 0 };
+  const n = { x: 0, y: 1 };
+  const focus = { x: 0, y: 40 };
+
+  it('leaves the start untouched', () => {
+    expect(ribbonPoint(p, n, 30, 0, 1, focus)).toEqual({ x: 100, y: 30 });
+  });
+
+  it('full convergence gathers every column at the focus point', () => {
+    for (const t of [-50, 0, 50]) expect(ribbonPoint(p, n, t, 1, 1, focus)).toEqual({ x: 100, y: 40 });
+  });
+
+  it('negative convergence fans out and ignores the focus', () => {
+    expect(ribbonPoint(p, n, 30, 1, -0.5, focus)).toEqual({ x: 100, y: 45 });
   });
 });
